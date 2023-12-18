@@ -122,12 +122,8 @@ extension McuMgrBleTransport: CBPeripheralDelegate {
             return
         }
         
-        if #available(iOS 10.0, *) {
-            log(msg: "peripheral(_, didUpdateValueFor: SMP_CHARACTERISTIC, _): \(data.hexEncodedString(options: .prepend0x))", atLevel: .debug)
-        }
-        
         // Check that we've received all the data for the Sequence Number of the
-        // previous recevied Data.
+        // previous received Data.
         if let previousUpdateNotificationSequenceNumber = previousUpdateNotificationSequenceNumber,
            !writeState.isChunkComplete(for: previousUpdateNotificationSequenceNumber) {
             

@@ -16,7 +16,7 @@ public enum PeripheralState {
     /// State set when the peripheral gets connected and the
     /// manager starts service discovery.
     case initializing
-    /// State set when device becones ready, that is all required
+    /// State set when device becomes ready, that is all required
     /// services have been discovered and notifications enabled.
     case connected
     /// State set when close() method has been called.
@@ -41,7 +41,7 @@ public class McuMgrBleTransport: NSObject {
     /// The CBCentralManager instance from which the peripheral was obtained.
     /// This is used to connect and cancel connection.
     internal let centralManager: CBCentralManager
-    /// The queue used to buffer reqeusts when another one is in progress.
+    /// The queue used to buffer requests when another one is in progress.
     private let operationQueue: OperationQueue
     /// Lock used to wait for callbacks before continuing the request. This lock
     /// is used to wait for the device to setup (i.e. connection, descriptor)
@@ -53,7 +53,7 @@ public class McuMgrBleTransport: NSObject {
     internal var previousUpdateNotificationSequenceNumber: McuSequenceNumber?
     
     /// SMP Characteristic object. Used to write requests and receive
-    /// notificaitons.
+    /// notifications.
     internal var smpCharacteristic: CBCharacteristic?
     
     /// An array of observers.
@@ -111,7 +111,7 @@ public class McuMgrBleTransport: NSObject {
     /// The peripheral will connect automatically if a request to it is
     /// made. To disconnect from the peripheral, call `close()`.
     ///
-    /// - parameter target: The BLE peripheral with Simple Managerment
+    /// - parameter target: The BLE peripheral with Simple Management
     ///   Protocol (SMP) service.
     public convenience init(_ target: CBPeripheral) {
         self.init(target.identifier)
@@ -127,7 +127,7 @@ public class McuMgrBleTransport: NSObject {
     /// The peripheral will connect automatically if a request to it is
     /// made. To disconnect from the peripheral, call `close()`.
     ///
-    /// - parameter targetIdentifier: The UUID of the peripheral with Simple Managerment
+    /// - parameter targetIdentifier: The UUID of the peripheral with Simple Management
     ///   Protocol (SMP) service.
     public init(_ targetIdentifier: UUID) {
         self.centralManager = CBCentralManager(delegate: nil, queue: .global(qos: .userInitiated))
@@ -174,7 +174,7 @@ extension McuMgrBleTransport: McuMgrTransport {
                     let waitInterval = min(timeout, McuMgrBleTransportConstant.WAIT_AND_RETRY_INTERVAL)
                     sleep(UInt32(waitInterval))
                     if let header = try? McuMgrHeader(data: data) {
-                        self.log(msg: "Retry \(i + 1) for Seq. No. \(header.sequenceNumber)", atLevel: .info)
+                        self.log(msg: "Retry \(i + 1) for seq: \(header.sequenceNumber)", atLevel: .info)
                     } else {
                         self.log(msg: "Retry \(i + 1) (Unknown Header Type)", atLevel: .info)
                     }
@@ -270,7 +270,7 @@ extension McuMgrBleTransport: McuMgrTransport {
                     return .failure(McuMgrTransportError.connectionTimeout)
                 }
                 // continue
-                log(msg: "Central Manager  ready", atLevel: .verbose)
+                log(msg: "Central Manager ready", atLevel: .info)
                 targetPeripheral = target
             }
         }
@@ -285,7 +285,7 @@ extension McuMgrBleTransport: McuMgrTransport {
                 // If the peripheral was already connected, but the SMP
                 // characteristic has not been set, start by performing service
                 // discovery. Once the characteristic's notification is enabled,
-                // the semaphore will be signalled and the request can be sent.
+                // the semaphore will be signaled and the request can be sent.
                 log(msg: "Peripheral already connected", atLevel: .info)
                 log(msg: "Discovering services...", atLevel: .verbose)
                 state = .connecting
@@ -294,17 +294,17 @@ extension McuMgrBleTransport: McuMgrTransport {
             case .disconnected:
                 // If the peripheral is disconnected, begin the setup process by
                 // connecting to the device. Once the characteristic's
-                // notification is enabled, the semaphore will be signalled and
+                // notification is enabled, the semaphore will be signaled and
                 // the request can be sent.
                 log(msg: "Connecting...", atLevel: .verbose)
                 state = .connecting
                 centralManager.connect(targetPeripheral)
             case .connecting:
-                log(msg: "Device is connecting. Wait...", atLevel: .info)
+                log(msg: "Device is connecting...", atLevel: .info)
                 state = .connecting
                 // Do nothing. It will switch to .connected or .disconnected.
             case .disconnecting:
-                log(msg: "Device is disconnecting. Wait...", atLevel: .info)
+                log(msg: "Device is disconnecting...", atLevel: .info)
                 // If the peripheral's connection state is transitioning, wait and retry
                 return .failure(McuMgrTransportError.waitAndRetry)
             @unknown default:
@@ -361,12 +361,13 @@ extension McuMgrBleTransport: McuMgrTransport {
                 return .failure(McuMgrTransportError.badChunking)
             }
             
-            // All chunks of the same packet need to be sent together. Otherwise, they can't
-            // be merged properly on the receiving end.
-            writeState.sharedLock { [weak self] in
-                for chunk in dataChunks {
-                    self?.log(msg: "-> [Seq: \(sequenceNumber)] \(chunk.hexEncodedString(options: .prepend0x)) (\(chunk.count) bytes)", atLevel: .debug)
-                    targetPeripheral.writeValue(chunk, for: smpCharacteristic, type: .withoutResponse)
+            coordinatedWrite(of: dataChunks, to: targetPeripheral, characteristic: smpCharacteristic) { [weak self] chunk, error in
+                if let error {
+                    writeLock.open(error)
+                    return
+                }
+                if let chunk {
+                    self?.log(msg: "-> [Seq: \(sequenceNumber)] \(chunk.hexEncodedString(options: [.upperCase, .twoByteSpacing])) (\(chunk.count) bytes)", atLevel: .debug)
                 }
             }
         } else {
@@ -376,9 +377,15 @@ extension McuMgrBleTransport: McuMgrTransport {
                 return .failure(McuMgrTransportError.insufficientMtu(mtu: mtu))
             }
             
-            // We're only sending one 'chunk' so no need for shared lock.
-            log(msg: "-> [Seq: \(sequenceNumber)] \(data.hexEncodedString(options: .prepend0x)) (\(data.count) bytes)", atLevel: .debug)
-            targetPeripheral.writeValue(data, for: smpCharacteristic, type: .withoutResponse)
+            coordinatedWrite(of: [data], to: targetPeripheral, characteristic: smpCharacteristic) { [weak self] data, error in
+                if let error {
+                    writeLock.open(error)
+                    return
+                }
+                if let data {
+                    self?.log(msg: "-> [Seq: \(sequenceNumber)] \(data.hexEncodedString(options: [.upperCase, .twoByteSpacing])) (\(data.count) bytes)", atLevel: .debug)
+                }
+            }
         }
 
         // Wait for the didUpdateValueFor(characteristic:) to open the lock.
@@ -394,14 +401,43 @@ extension McuMgrBleTransport: McuMgrTransport {
         case .success:
             guard let returnData = writeState[sequenceNumber]?.chunk else {
                 return .failure(McuMgrTransportError.badHeader)
-            }            
-            log(msg: "<- [Seq: \(sequenceNumber)] \(returnData.hexEncodedString(options: .prepend0x)) (\(returnData.count) bytes)", atLevel: .debug)
+            }
+            log(msg: "<- [Seq: \(sequenceNumber)] \(returnData.hexEncodedString(options: [.upperCase, .twoByteSpacing])) (\(returnData.count) bytes)", atLevel: .debug)
             return .success(returnData)
         }
     }
     
+    /**
+     All chunks of the same packet need to be sent together. Otherwise, they can't be merged properly on the receiving end. This lock guarantees parallel writes don't mean each write command's bytes are not sent interleaved.
+     */
+    private func coordinatedWrite(of data: [Data], to peripheral: CBPeripheral, characteristic: CBCharacteristic, callback: @escaping (Data?, McuMgrTransportError?) -> Void) {
+        writeState.sharedLock {
+            var writesSent = 0
+            for chunk in data {
+                if writesSent > McuMgrBleTransportConstant.WRITE_VALUE_BUFFER_SIZE, #available(iOS 11.0, *) {
+                    var waitAttempts = 0
+                    while !peripheral.canSendWriteWithoutResponse {
+                        usleep(McuMgrBleTransportConstant.CONNECTION_BUFFER_WAIT_TIME_USECONDS)
+                        waitAttempts += 1
+                        if waitAttempts > 6 {
+                            callback(nil, McuMgrTransportError.sendFailed)
+                            return
+                        }
+                    }
+                    writesSent = 0
+                }
+                
+                callback(chunk, nil)
+                peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
+                writesSent += 1
+            }
+        }
+    }
+    
     internal func log(msg: @autoclosure () -> String, atLevel level: McuMgrLogLevel) {
-        logDelegate?.log(msg(), ofCategory: .transport, atLevel: level)
+        if let logDelegate, level >= logDelegate.minLogLevel() {
+            logDelegate.log(msg(), ofCategory: .transport, atLevel: level)
+        }
     }
 }
 
@@ -418,6 +454,16 @@ public enum McuMgrBleTransportConstant {
     internal static let WAIT_AND_RETRY_INTERVAL = 10
     /// Connection timeout in seconds.
     internal static let CONNECTION_TIMEOUT = 20
+    /**
+     How many `cbPeripheral.writeValue()` calls can be enqueued before the CoreBluetooth API's buffer fills and stops enqueuing Data to send.
+     */
+    internal static let WRITE_VALUE_BUFFER_SIZE = 10
+    /**
+     The minimum amount of time we expect needs to elapse before the Write Without Response buffer is cleared in microseconds.
+     
+     The minimum connection interval time is 15 ms, as noted in this technical document: `https://developer.apple.com/library/archive/qa/qa1931/_index.html`. Therefore, it is reasonable to assume that past this interval, the BLE Radio will be powered up by the CoreBluetooth API / Subsystem to send the write values we've enqueued onto the CBPeripheral.
+     */
+    internal static let CONNECTION_BUFFER_WAIT_TIME_USECONDS: UInt32 = 15000
 }
 
 // MARK: - McuMgrBleTransportKey
